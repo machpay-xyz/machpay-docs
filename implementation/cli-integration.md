@@ -27,10 +27,12 @@ This document outlines the complete integration plan for the MachPay CLI Orchest
 |------|---------|----------|
 | `machpay-cli` | **NEW** - Lightweight orchestrator | P0 |
 | `machpay-gateway` | Add version endpoint, release automation | P0 |
-| `machpay-backend` | Device auth flow endpoints | P0 |
+| `machpay-console` | CLI login page (browser redirect) | P0 |
 | `machpay-console` | Tauri integration for desktop bundling | P1 |
 | `machpay-website` | Download page, install script hosting | P1 |
 | `homebrew-tap` | **NEW** - Homebrew formula repo | P2 |
+
+> **Note:** No backend changes needed! The CLI uses browser redirect auth which reuses existing login endpoints.
 
 ---
 
@@ -124,200 +126,102 @@ require (
 
 ---
 
-### 1.2 Backend: Device Authentication Flow
+### 1.2 Console: CLI Login Callback Page
 
-**Objective:** Implement OAuth 2.0 Device Authorization Grant in the backend.
+**Objective:** Create the page that handles CLI login and redirects back with token.
 
-#### New API Endpoints
-
-```
-POST /v1/auth/device/init
-POST /v1/auth/device/token
-POST /v1/auth/device/approve (called by web console)
-```
-
-#### Endpoint Specifications
-
-**POST /v1/auth/device/init**
-
-Request:
-```json
-{
-  "client_id": "machpay-cli",
-  "scope": "agent vendor"
-}
-```
-
-Response:
-```json
-{
-  "device_code": "GmRhYjQ5N2...",
-  "user_code": "XK9-7NP",
-  "verification_uri": "https://console.machpay.xyz/device",
-  "verification_uri_complete": "https://console.machpay.xyz/device?code=XK9-7NP",
-  "expires_in": 900,
-  "interval": 5
-}
-```
-
-**POST /v1/auth/device/token**
-
-Request:
-```json
-{
-  "client_id": "machpay-cli",
-  "device_code": "GmRhYjQ5N2...",
-  "grant_type": "urn:ietf:params:oauth:grant-type:device_code"
-}
-```
-
-Response (pending):
-```json
-{
-  "error": "authorization_pending"
-}
-```
-
-Response (success):
-```json
-{
-  "access_token": "eyJ...",
-  "refresh_token": "eyJ...",
-  "token_type": "Bearer",
-  "expires_in": 3600,
-  "user": {
-    "id": "user_123",
-    "email": "user@example.com",
-    "name": "John Doe"
-  }
-}
-```
-
-#### Database Schema
-
-```sql
--- migrations/XXXXXX_device_auth.up.sql
-
-CREATE TABLE device_auth_requests (
-    id              BIGSERIAL PRIMARY KEY,
-    device_code     VARCHAR(64) UNIQUE NOT NULL,
-    user_code       VARCHAR(16) UNIQUE NOT NULL,
-    client_id       VARCHAR(64) NOT NULL,
-    scope           VARCHAR(256),
-    user_id         BIGINT REFERENCES users(id),  -- NULL until approved
-    status          VARCHAR(20) DEFAULT 'pending', -- pending, approved, denied, expired
-    expires_at      TIMESTAMP NOT NULL,
-    approved_at     TIMESTAMP,
-    created_at      TIMESTAMP DEFAULT NOW()
-);
-
-CREATE INDEX idx_device_auth_device_code ON device_auth_requests(device_code);
-CREATE INDEX idx_device_auth_user_code ON device_auth_requests(user_code);
-CREATE INDEX idx_device_auth_expires ON device_auth_requests(expires_at);
-```
-
-#### Tasks
-
-- [ ] Create migration for `device_auth_requests` table
-- [ ] Implement `POST /v1/auth/device/init` handler
-- [ ] Implement `POST /v1/auth/device/token` handler (polling)
-- [ ] Implement `POST /v1/auth/device/approve` handler (web console calls this)
-- [ ] Add cleanup job for expired device codes
-- [ ] Write unit tests for device flow
-- [ ] Update API documentation
-
----
-
-### 1.3 Console: Device Approval Page
-
-**Objective:** Create the web page where users approve CLI login requests.
+> **Auth Flow:** Browser Redirect (like TradingView, Vercel CLI)
+> 
+> 1. CLI starts localhost HTTP server on random port
+> 2. CLI opens browser to `console.machpay.xyz/auth/cli?port=54321`
+> 3. User logs in normally (Google, Wallet, Email)
+> 4. Console redirects to `localhost:54321/callback?token=JWT`
+> 5. CLI receives token, saves to config, closes server
 
 #### Route
 
 ```
-/device
-/device?code=XK9-7NP (pre-filled)
+/auth/cli?port=54321
 ```
 
-#### UI Components
+#### Page Logic
 
 ```jsx
-// src/pages/DeviceAuth.jsx
+// src/pages/CLILogin.jsx
 
-export function DeviceAuth() {
-  const [code, setCode] = useState('');
-  const [status, setStatus] = useState('input'); // input, verifying, success, error
-  const [error, setError] = useState(null);
-  
-  // If code in URL, pre-fill and auto-verify
+import { useEffect } from 'react';
+import { useSearchParams } from 'react-router-dom';
+import { useAuth } from '../App';
+import { getToken } from '../services/auth';
+import { Loader2 } from 'lucide-react';
+
+export default function CLILogin() {
+  const { user, isAuthenticated } = useAuth();
+  const [searchParams] = useSearchParams();
+  const port = searchParams.get('port');
+
   useEffect(() => {
-    const urlCode = new URLSearchParams(location.search).get('code');
-    if (urlCode) {
-      setCode(urlCode);
-      handleVerify(urlCode);
+    if (isAuthenticated && port) {
+      // Redirect to CLI's localhost callback with token
+      const token = getToken();
+      window.location.href = `http://localhost:${port}/callback?token=${token}`;
     }
-  }, []);
+  }, [isAuthenticated, port]);
 
-  const handleVerify = async (userCode) => {
-    setStatus('verifying');
-    try {
-      await api.verifyDeviceCode(userCode);
-      setStatus('success');
-    } catch (err) {
-      setError(err.message);
-      setStatus('error');
-    }
-  };
+  // Validate port
+  const portNum = parseInt(port, 10);
+  if (!port || isNaN(portNum) || portNum < 1024 || portNum > 65535) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-void">
+        <div className="text-center">
+          <h1 className="text-2xl font-bold text-red-400">Invalid Request</h1>
+          <p className="text-zinc-400 mt-2">Missing or invalid port parameter</p>
+        </div>
+      </div>
+    );
+  }
 
-  return (
-    <div className="min-h-screen flex items-center justify-center">
-      <Panel className="max-w-md w-full p-8">
-        {status === 'input' && (
-          <>
-            <h1>Link MachPay CLI</h1>
-            <p>Enter the code shown in your terminal</p>
-            <CodeInput value={code} onChange={setCode} />
-            <Button onClick={() => handleVerify(code)}>
-              Authorize
-            </Button>
-          </>
-        )}
-        
-        {status === 'verifying' && (
-          <Spinner>Verifying...</Spinner>
-        )}
-        
-        {status === 'success' && (
-          <>
-            <CheckCircle className="text-emerald-500 w-16 h-16" />
-            <h1>CLI Linked!</h1>
-            <p>You can close this window and return to your terminal.</p>
-          </>
-        )}
-        
-        {status === 'error' && (
-          <>
-            <XCircle className="text-red-500 w-16 h-16" />
-            <h1>Verification Failed</h1>
-            <p>{error}</p>
-            <Button onClick={() => setStatus('input')}>Try Again</Button>
-          </>
-        )}
-      </Panel>
-    </div>
-  );
+  if (isAuthenticated) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-void">
+        <div className="text-center">
+          <Loader2 className="w-8 h-8 animate-spin text-emerald-400 mx-auto" />
+          <p className="text-zinc-400 mt-4">Redirecting to CLI...</p>
+        </div>
+      </div>
+    );
+  }
+
+  // Not authenticated - show normal login UI
+  // The Auth component will redirect back here after login
+  return <Auth returnTo={`/auth/cli?port=${port}`} />;
 }
 ```
 
+#### Route Registration (App.jsx)
+
+```jsx
+const CLILogin = lazy(() => import('./pages/CLILogin'));
+
+// In Routes:
+<Route path="/auth/cli" element={<Suspense fallback={<PageLoader />}><CLILogin /></Suspense>} />
+```
+
+#### Security Considerations
+
+- Only redirect to `localhost` (not arbitrary URLs)
+- Validate port is a number in valid range (1024-65535)
+- Token is short-lived JWT
+- HTTPS not needed for localhost callback
+
 #### Tasks
 
-- [ ] Create `/device` route in App.jsx
-- [ ] Implement `DeviceAuth` page component
-- [ ] Create `CodeInput` component (6-character input with formatting)
-- [ ] Add `api.verifyDeviceCode()` and `api.approveDeviceCode()` methods
-- [ ] Handle auto-verification when code is in URL
-- [ ] Add success/error animations
-- [ ] Test flow end-to-end
+- [ ] Create `CLILogin.jsx` page component
+- [ ] Add `/auth/cli` route in App.jsx
+- [ ] Validate port parameter
+- [ ] Handle redirect after login
+- [ ] Test with all login methods (Google, Wallet, Email)
+- [ ] Test flow end-to-end with mock CLI
 
 ---
 
@@ -325,21 +229,15 @@ export function DeviceAuth() {
 
 ### 2.1 `machpay login` Command
 
-**Objective:** Implement device flow authentication in CLI.
+**Objective:** Implement browser redirect authentication in CLI.
 
 #### User Flow
 
 ```
 $ machpay login
 
-🔐 Authenticate with MachPay
-
-  1. Your verification code is: XK9-7NP
-  2. Press [Enter] to open browser...
-
-  Opening https://console.machpay.xyz/device?code=XK9-7NP
-
-  Waiting for approval... ◐
+🌐 Opening browser for authentication...
+⏳ Waiting for login (press Ctrl+C to cancel)
 
 ✅ Logged in as abhishek@machpay.xyz
 
@@ -354,16 +252,29 @@ $ machpay login
 package cmd
 
 import (
+    "context"
+    "fmt"
+    "net"
+    "net/http"
+    "time"
+
+    "github.com/pkg/browser"
     "github.com/spf13/cobra"
     "github.com/machpay/machpay-cli/internal/auth"
-    "github.com/machpay/machpay-cli/internal/tui"
+    "github.com/machpay/machpay-cli/internal/config"
 )
 
 var loginCmd = &cobra.Command{
     Use:   "login",
     Short: "Authenticate with MachPay",
-    Long:  "Link your CLI to your MachPay account using secure device flow authentication.",
+    Long:  "Link your CLI to your MachPay account via browser login.",
     RunE:  runLogin,
+}
+
+var noBrowser bool
+
+func init() {
+    loginCmd.Flags().BoolVar(&noBrowser, "no-browser", false, "Print URL instead of opening browser")
 }
 
 func runLogin(cmd *cobra.Command, args []string) error {
@@ -373,54 +284,142 @@ func runLogin(cmd *cobra.Command, args []string) error {
         return nil
     }
 
-    // 2. Initialize device flow
-    deviceResp, err := auth.InitDeviceFlow()
+    // 2. Find a free port
+    port, err := findFreePort()
     if err != nil {
-        return fmt.Errorf("failed to initialize login: %w", err)
+        return fmt.Errorf("failed to find free port: %w", err)
     }
 
-    // 3. Display code and prompt
-    tui.PrintHeader("🔐 Authenticate with MachPay")
-    fmt.Printf("\n  1. Your verification code is: %s\n", tui.Bold(deviceResp.UserCode))
-    fmt.Println("  2. Press [Enter] to open browser...")
-    
-    tui.WaitForEnter()
+    // 3. Start local callback server
+    tokenChan := make(chan string, 1)
+    errChan := make(chan error, 1)
+    server := auth.StartCallbackServer(port, tokenChan, errChan)
+    defer server.Shutdown(context.Background())
 
-    // 4. Open browser
-    browser.Open(deviceResp.VerificationURIComplete)
+    // 4. Build login URL
+    consoleURL := config.GetConsoleURL()
+    loginURL := fmt.Sprintf("%s/auth/cli?port=%d", consoleURL, port)
 
-    // 5. Poll for approval with spinner
-    spinner := tui.NewSpinner("Waiting for approval...")
-    spinner.Start()
-    
-    tokenResp, err := auth.PollForToken(deviceResp.DeviceCode, deviceResp.Interval)
-    spinner.Stop()
-    
-    if err != nil {
-        return fmt.Errorf("authentication failed: %w", err)
+    // 5. Open browser or print URL
+    if noBrowser {
+        fmt.Printf("Open this URL in your browser:\n\n  %s\n\n", loginURL)
+    } else {
+        fmt.Println("🌐 Opening browser for authentication...")
+        browser.OpenURL(loginURL)
     }
 
-    // 6. Save credentials
-    if err := auth.SaveCredentials(tokenResp); err != nil {
-        return fmt.Errorf("failed to save credentials: %w", err)
-    }
+    fmt.Println("⏳ Waiting for login (press Ctrl+C to cancel)")
 
-    // 7. Success message
-    tui.PrintSuccess(fmt.Sprintf("Logged in as %s", tokenResp.User.Email))
-    fmt.Println("\n  Your credentials have been saved to ~/.machpay/config.yaml")
-    
-    return nil
+    // 6. Wait for callback (with timeout)
+    select {
+    case token := <-tokenChan:
+        if err := auth.SaveToken(token); err != nil {
+            return fmt.Errorf("failed to save credentials: %w", err)
+        }
+        
+        user, _ := auth.GetUserFromToken(token)
+        fmt.Printf("\n✅ Logged in as %s\n", user.Email)
+        fmt.Println("\n  Your credentials have been saved to ~/.machpay/config.yaml")
+        return nil
+
+    case err := <-errChan:
+        return fmt.Errorf("login failed: %w", err)
+
+    case <-time.After(5 * time.Minute):
+        return fmt.Errorf("login timed out after 5 minutes")
+    }
 }
+
+func findFreePort() (int, error) {
+    listener, err := net.Listen("tcp", "localhost:0")
+    if err != nil {
+        return 0, err
+    }
+    defer listener.Close()
+    return listener.Addr().(*net.TCPAddr).Port, nil
+}
+```
+
+#### Browser Callback Server
+
+```go
+// internal/auth/browser.go
+
+package auth
+
+import (
+    "fmt"
+    "net/http"
+)
+
+func StartCallbackServer(port int, tokenChan chan<- string, errChan chan<- error) *http.Server {
+    mux := http.NewServeMux()
+
+    mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
+        token := r.URL.Query().Get("token")
+        if token == "" {
+            errChan <- fmt.Errorf("no token received")
+            http.Error(w, "No token", http.StatusBadRequest)
+            return
+        }
+
+        // Send success page to browser
+        w.Header().Set("Content-Type", "text/html")
+        w.Write([]byte(successHTML))
+
+        tokenChan <- token
+    })
+
+    server := &http.Server{
+        Addr:    fmt.Sprintf("localhost:%d", port),
+        Handler: mux,
+    }
+
+    go server.ListenAndServe()
+    return server
+}
+
+const successHTML = `<!DOCTYPE html>
+<html>
+<head>
+    <title>MachPay CLI - Login Success</title>
+    <style>
+        body { 
+            font-family: system-ui, -apple-system, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            background: #0a0a0a;
+            color: #fff;
+        }
+        .container { text-align: center; }
+        .check { font-size: 64px; margin-bottom: 20px; }
+        h1 { margin: 0 0 10px; color: #10b981; }
+        p { color: #71717a; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="check">✅</div>
+        <h1>Login Successful!</h1>
+        <p>You can close this window and return to your terminal.</p>
+    </div>
+</body>
+</html>`
 ```
 
 #### Tasks
 
-- [ ] Implement `auth.InitDeviceFlow()` API call
-- [ ] Implement `auth.PollForToken()` with exponential backoff
-- [ ] Implement `auth.SaveCredentials()` to config file
-- [ ] Create TUI components (spinner, bold text, success message)
-- [ ] Handle Ctrl+C gracefully during polling
-- [ ] Add `--no-browser` flag for headless environments
+- [ ] Implement `findFreePort()` to get available port
+- [ ] Implement `StartCallbackServer()` for token callback
+- [ ] Implement `SaveToken()` to config file
+- [ ] Implement `GetUserFromToken()` to parse JWT claims
+- [ ] Create success HTML page for browser
+- [ ] Handle Ctrl+C gracefully
+- [ ] Add `--no-browser` flag for SSH/headless
+- [ ] Add 5 minute timeout
 - [ ] Write integration tests
 
 ---
@@ -1704,7 +1703,7 @@ DOCUMENTATION:
 
 | Phase | Duration | Key Deliverables |
 |-------|----------|------------------|
-| Phase 1: Foundation | Week 1 | CLI repo, device auth, approval page |
+| Phase 1: Foundation | Week 1 | CLI repo, console CLI login page |
 | Phase 2: CLI Core | Week 2 | login, setup, status, open commands |
 | Phase 3: Gateway | Week 3 | Downloader, process manager, serve command |
 | Phase 4: Desktop | Week 4 | Tauri bundling, first launch flow |
@@ -1712,6 +1711,8 @@ DOCUMENTATION:
 | Phase 6: Polish | Week 6 | Docs, testing, launch |
 
 **Total: 6 weeks to launch** 🚀
+
+> **Auth Approach:** Browser redirect (like TradingView, Vercel CLI) - no backend changes needed!
 
 ---
 
