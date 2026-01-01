@@ -8,9 +8,11 @@
 
 **Goal:** Interactive setup wizard and utility commands
 
+**TUI Approach:** Hybrid - Simple stdin prompts with Lipgloss styling (no Bubble Tea)
+
 | Prompt | Component | Description |
 |--------|-----------|-------------|
-| 2.1 | TUI Prompts | Bubble Tea interactive prompt components |
+| 2.1 | TUI Prompts | Simple stdin prompts with lipgloss styling |
 | 2.2 | Setup Command | `machpay setup` wizard |
 | 2.3 | Wallet Generation | Solana keypair generation/import |
 | 2.4 | API Key Creation | Backend integration for API keys |
@@ -20,52 +22,23 @@
 
 ---
 
-## Prompt 2.1: TUI Prompt Components
+## Prompt 2.1: Simple Prompt Components (Lipgloss Styled)
 
 ### Context
 
-We need reusable Bubble Tea components for the interactive setup wizard. These will be used across multiple commands and should provide a consistent, beautiful terminal experience.
+We need reusable prompt components for the interactive setup wizard. Using simple stdin-based prompts with Lipgloss styling - no Bubble Tea dependency. This approach works in all terminals including CI/CD and SSH sessions.
 
 ### Task
 
-Create `internal/tui/prompts.go` with the following components:
+Create `internal/tui/prompts.go` with styled stdin prompt helpers.
 
 ### Requirements
 
-1. **SelectPrompt** - Single selection from list
-   ```go
-   type SelectPrompt struct {
-       Question string
-       Options  []SelectOption
-       Selected int
-   }
-   
-   type SelectOption struct {
-       Label       string
-       Description string
-       Value       string
-   }
-   ```
+1. **Select** - Numbered selection from list
+2. **TextInput** - Text input with validation
+3. **Confirm** - Y/n confirmation
 
-2. **TextInputPrompt** - Text input with validation
-   ```go
-   type TextInputPrompt struct {
-       Question    string
-       Placeholder string
-       Validator   func(string) error
-       Value       string
-   }
-   ```
-
-3. **ConfirmPrompt** - Yes/No confirmation
-   ```go
-   type ConfirmPrompt struct {
-       Question string
-       Default  bool
-   }
-   ```
-
-### Implementation Details
+### Implementation
 
 ```go
 // internal/tui/prompts.go
@@ -73,89 +46,281 @@ Create `internal/tui/prompts.go` with the following components:
 package tui
 
 import (
-    "github.com/charmbracelet/bubbles/textinput"
-    tea "github.com/charmbracelet/bubbletea"
+    "bufio"
+    "fmt"
+    "os"
+    "strconv"
+    "strings"
+
     "github.com/charmbracelet/lipgloss"
 )
 
-// SelectPrompt allows user to select from a list of options
-type SelectPrompt struct {
-    question string
-    options  []SelectOption
-    cursor   int
-    done     bool
-    aborted  bool
+// ============================================================
+// Styles
+// ============================================================
+
+var (
+    questionStyle = lipgloss.NewStyle().
+        Bold(true).
+        Foreground(lipgloss.Color("#ffffff"))
+
+    optionNumberStyle = lipgloss.NewStyle().
+        Foreground(lipgloss.Color("#10b981")).
+        Bold(true)
+
+    optionLabelStyle = lipgloss.NewStyle().
+        Foreground(lipgloss.Color("#ffffff"))
+
+    optionDescStyle = lipgloss.NewStyle().
+        Foreground(lipgloss.Color("#71717a")).
+        MarginLeft(4)
+
+    promptStyle = lipgloss.NewStyle().
+        Foreground(lipgloss.Color("#10b981"))
+
+    errorStyle = lipgloss.NewStyle().
+        Foreground(lipgloss.Color("#ef4444"))
+
+    boxStyle = lipgloss.NewStyle().
+        Border(lipgloss.RoundedBorder()).
+        BorderForeground(lipgloss.Color("#3f3f46")).
+        Padding(0, 2)
+)
+
+// ============================================================
+// SelectOption
+// ============================================================
+
+type SelectOption struct {
+    Label       string
+    Description string
+    Value       string
 }
 
-func NewSelectPrompt(question string, options []SelectOption) *SelectPrompt {
-    return &SelectPrompt{
-        question: question,
-        options:  options,
-    }
-}
+// ============================================================
+// Select - Numbered selection prompt
+// ============================================================
 
-func (m SelectPrompt) Init() tea.Cmd {
-    return nil
-}
+// Select displays a numbered list and returns the selected option
+func Select(question string, options []SelectOption) (SelectOption, error) {
+    fmt.Println()
+    fmt.Println(questionStyle.Render(question))
+    fmt.Println()
 
-func (m SelectPrompt) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-    switch msg := msg.(type) {
-    case tea.KeyMsg:
-        switch msg.String() {
-        case "ctrl+c", "q":
-            m.aborted = true
-            return m, tea.Quit
-        case "up", "k":
-            if m.cursor > 0 {
-                m.cursor--
-            }
-        case "down", "j":
-            if m.cursor < len(m.options)-1 {
-                m.cursor++
-            }
-        case "enter":
-            m.done = true
-            return m, tea.Quit
+    for i, opt := range options {
+        num := optionNumberStyle.Render(fmt.Sprintf("[%d]", i+1))
+        label := optionLabelStyle.Render(opt.Label)
+        fmt.Printf("  %s %s\n", num, label)
+        if opt.Description != "" {
+            fmt.Println(optionDescStyle.Render(opt.Description))
         }
     }
-    return m, nil
-}
 
-func (m SelectPrompt) View() string {
-    // Beautiful rendering with lipgloss
-    // Show question, options with cursor indicator
-    // Selected option highlighted in emerald
-}
+    fmt.Println()
+    
+    reader := bufio.NewReader(os.Stdin)
+    for {
+        fmt.Print(promptStyle.Render(fmt.Sprintf("Enter choice [1-%d]: ", len(options))))
+        
+        input, err := reader.ReadString('\n')
+        if err != nil {
+            return SelectOption{}, fmt.Errorf("read input: %w", err)
+        }
 
-func (m SelectPrompt) Selected() (SelectOption, bool) {
-    if m.aborted {
-        return SelectOption{}, false
+        input = strings.TrimSpace(input)
+        if input == "" {
+            continue
+        }
+
+        choice, err := strconv.Atoi(input)
+        if err != nil || choice < 1 || choice > len(options) {
+            fmt.Println(errorStyle.Render(fmt.Sprintf("Please enter a number between 1 and %d", len(options))))
+            continue
+        }
+
+        return options[choice-1], nil
     }
-    return m.options[m.cursor], true
+}
+
+// ============================================================
+// TextInput - Text input with validation
+// ============================================================
+
+// TextInput prompts for text input with optional validation
+func TextInput(question string, placeholder string, validator func(string) error) (string, error) {
+    fmt.Println()
+    fmt.Println(questionStyle.Render(question))
+    if placeholder != "" {
+        fmt.Println(optionDescStyle.Render("Example: " + placeholder))
+    }
+    fmt.Println()
+
+    reader := bufio.NewReader(os.Stdin)
+    for {
+        fmt.Print(promptStyle.Render("> "))
+        
+        input, err := reader.ReadString('\n')
+        if err != nil {
+            return "", fmt.Errorf("read input: %w", err)
+        }
+
+        input = strings.TrimSpace(input)
+        if input == "" {
+            fmt.Println(errorStyle.Render("Input cannot be empty"))
+            continue
+        }
+
+        if validator != nil {
+            if err := validator(input); err != nil {
+                fmt.Println(errorStyle.Render(err.Error()))
+                continue
+            }
+        }
+
+        return input, nil
+    }
+}
+
+// TextInputOptional allows empty input
+func TextInputOptional(question string, placeholder string, defaultValue string) (string, error) {
+    fmt.Println()
+    fmt.Println(questionStyle.Render(question))
+    if defaultValue != "" {
+        fmt.Println(optionDescStyle.Render(fmt.Sprintf("Default: %s (press Enter to use)", defaultValue)))
+    }
+    fmt.Println()
+
+    reader := bufio.NewReader(os.Stdin)
+    fmt.Print(promptStyle.Render("> "))
+    
+    input, err := reader.ReadString('\n')
+    if err != nil {
+        return "", fmt.Errorf("read input: %w", err)
+    }
+
+    input = strings.TrimSpace(input)
+    if input == "" {
+        return defaultValue, nil
+    }
+
+    return input, nil
+}
+
+// ============================================================
+// Confirm - Y/n confirmation
+// ============================================================
+
+// Confirm prompts for yes/no confirmation
+func Confirm(question string, defaultYes bool) (bool, error) {
+    fmt.Println()
+    
+    prompt := question
+    if defaultYes {
+        prompt += " [Y/n]: "
+    } else {
+        prompt += " [y/N]: "
+    }
+
+    reader := bufio.NewReader(os.Stdin)
+    fmt.Print(questionStyle.Render(prompt))
+    
+    input, err := reader.ReadString('\n')
+    if err != nil {
+        return false, fmt.Errorf("read input: %w", err)
+    }
+
+    input = strings.TrimSpace(strings.ToLower(input))
+    
+    if input == "" {
+        return defaultYes, nil
+    }
+
+    switch input {
+    case "y", "yes":
+        return true, nil
+    case "n", "no":
+        return false, nil
+    default:
+        fmt.Println(errorStyle.Render("Please enter 'y' or 'n'"))
+        return Confirm(question, defaultYes)
+    }
+}
+
+// ============================================================
+// Decorative Elements
+// ============================================================
+
+// PrintBanner displays a styled banner
+func PrintBanner(title string) {
+    banner := boxStyle.Render(title)
+    fmt.Println()
+    fmt.Println(banner)
+    fmt.Println()
+}
+
+// PrintSection prints a section divider
+func PrintSection() {
+    fmt.Println()
+    fmt.Println(lipgloss.NewStyle().
+        Foreground(lipgloss.Color("#3f3f46")).
+        Render("─────────────────────────────────────────────────────────────"))
+    fmt.Println()
 }
 ```
 
-### Styling
+### Example Usage
 
-- Use the existing `internal/tui/styles.go` color palette
-- Question text: Bold white
-- Options: Muted gray, selected option in emerald
-- Cursor: `❯` character in emerald
-- Description: Smaller, muted text below option
+```go
+// Role selection
+role, err := tui.Select("What do you want to do?", []tui.SelectOption{
+    {Label: "Run an AI Agent", Description: "I want to use APIs and pay for services", Value: "agent"},
+    {Label: "Run a Vendor Node", Description: "I want to sell my APIs and earn money", Value: "vendor"},
+})
+
+// Text input with validation
+url, err := tui.TextInput("Upstream API URL", "http://localhost:11434", func(s string) error {
+    if !strings.HasPrefix(s, "http") {
+        return fmt.Errorf("URL must start with http:// or https://")
+    }
+    return nil
+})
+
+// Confirmation
+startNow, err := tui.Confirm("Start gateway now?", true)
+```
+
+### Visual Output
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│   MachPay Setup Wizard                                       │
+└──────────────────────────────────────────────────────────────┘
+
+What do you want to do?
+
+  [1] Run an AI Agent
+      I want to use APIs and pay for services
+
+  [2] Run a Vendor Node
+      I want to sell my APIs and earn money
+
+Enter choice [1-2]: █
+```
 
 ### Files to Create
 
-1. `internal/tui/prompts.go` - Core prompt components
+1. `internal/tui/prompts.go` - Prompt components
 2. `internal/tui/prompts_test.go` - Unit tests
 
 ### Acceptance Criteria
 
-- [ ] SelectPrompt with keyboard navigation (j/k, up/down)
-- [ ] TextInputPrompt with real-time validation
-- [ ] ConfirmPrompt with Y/n default handling
-- [ ] All prompts support Ctrl+C to abort
-- [ ] Consistent styling matching app theme
-- [ ] Unit tests for each component
+- [ ] Select with numbered options and descriptions
+- [ ] TextInput with validation and error display
+- [ ] TextInputOptional with default value support
+- [ ] Confirm with Y/n defaults
+- [ ] Consistent Lipgloss styling
+- [ ] PrintBanner and PrintSection helpers
+- [ ] Unit tests for validation logic
 
 ---
 
@@ -163,7 +328,7 @@ func (m SelectPrompt) Selected() (SelectOption, bool) {
 
 ### Context
 
-The `machpay setup` command is an interactive wizard that guides users through initial configuration. It must handle both agent and vendor roles with different flows.
+The `machpay setup` command is an interactive wizard that guides users through initial configuration. Uses simple stdin prompts with Lipgloss styling.
 
 ### Task
 
@@ -175,25 +340,13 @@ Create `internal/cmd/setup.go` with the interactive setup wizard.
    - Must be logged in (show error if not)
    - Check if already configured (offer to reconfigure)
 
-2. **Role Selection**
-   ```
-   ? What do you want to do?
-     ❯ Run an AI Agent (I want to use APIs)
-       Run a Vendor Node (I want to sell APIs)
-   ```
-
-3. **Network Selection**
-   ```
-   ? Select network:
-     ❯ Devnet (Testing - free tokens)
-       Mainnet (Real money)
-   ```
-
+2. **Role Selection** (using tui.Select)
+3. **Network Selection** (using tui.Select)
 4. **Branch by Role**
    - Agent: Wallet setup → API key generation → Show quick start
    - Vendor: Service info → Wallet → Registration → Show next steps
 
-### Implementation Structure
+### Implementation
 
 ```go
 // internal/cmd/setup.go
@@ -201,11 +354,16 @@ Create `internal/cmd/setup.go` with the interactive setup wizard.
 package cmd
 
 import (
+    "fmt"
+    "os"
+    "path/filepath"
+
     "github.com/spf13/cobra"
-    tea "github.com/charmbracelet/bubbletea"
-    "github.com/machpay/machpay-cli/internal/tui"
+    
     "github.com/machpay/machpay-cli/internal/auth"
     "github.com/machpay/machpay-cli/internal/config"
+    "github.com/machpay/machpay-cli/internal/tui"
+    "github.com/machpay/machpay-cli/internal/wallet"
 )
 
 var setupNonInteractive bool
@@ -213,120 +371,370 @@ var setupNonInteractive bool
 var setupCmd = &cobra.Command{
     Use:   "setup",
     Short: "Interactive setup wizard",
-    Long:  `Configure your MachPay CLI as an agent or vendor.`,
-    RunE:  runSetup,
+    Long: `Configure your MachPay CLI as an agent or vendor.
+
+This wizard will guide you through:
+  - Choosing your role (Agent or Vendor)
+  - Selecting network (Devnet or Mainnet)
+  - Setting up your wallet
+  - Generating API keys or registering your service`,
+    RunE: runSetup,
 }
 
 func init() {
     setupCmd.Flags().BoolVar(&setupNonInteractive, "non-interactive", false, 
         "Use environment variables instead of prompts (for CI/CD)")
+    rootCmd.AddCommand(setupCmd)
 }
 
 func runSetup(cmd *cobra.Command, args []string) error {
     // 1. Check if logged in
     if !auth.IsLoggedIn() {
-        return fmt.Errorf("not logged in. Run 'machpay login' first")
+        tui.PrintError("Not logged in")
+        fmt.Println(tui.Muted("Run 'machpay login' first to authenticate."))
+        return fmt.Errorf("authentication required")
     }
 
     // 2. Show banner
     printSetupBanner()
 
-    // 3. Handle non-interactive mode
+    // 3. Check if already configured
+    cfg := config.Get()
+    if cfg.Role != "" {
+        reconfigure, err := tui.Confirm(
+            fmt.Sprintf("Already configured as %s. Reconfigure?", cfg.Role), 
+            false,
+        )
+        if err != nil {
+            return err
+        }
+        if !reconfigure {
+            fmt.Println(tui.Muted("Setup cancelled."))
+            return nil
+        }
+    }
+
+    // 4. Handle non-interactive mode
     if setupNonInteractive {
         return runNonInteractiveSetup()
     }
 
-    // 4. Run interactive wizard
+    // 5. Run interactive wizard
     return runInteractiveSetup()
 }
 
 func runInteractiveSetup() error {
     // Step 1: Role selection
-    role, err := promptRole()
+    tui.PrintSection()
+    role, err := tui.Select("What do you want to do?", []tui.SelectOption{
+        {
+            Label:       "Run an AI Agent",
+            Description: "I want to use APIs and pay for services",
+            Value:       "agent",
+        },
+        {
+            Label:       "Run a Vendor Node",
+            Description: "I want to sell my APIs and earn money",
+            Value:       "vendor",
+        },
+    })
     if err != nil {
         return err
     }
 
     // Step 2: Network selection
-    network, err := promptNetwork()
+    tui.PrintSection()
+    network, err := tui.Select("Select network:", []tui.SelectOption{
+        {
+            Label:       "Devnet",
+            Description: "Testing network - free tokens, no real money",
+            Value:       "devnet",
+        },
+        {
+            Label:       "Mainnet",
+            Description: "Production network - real USDC transactions",
+            Value:       "mainnet",
+        },
+    })
     if err != nil {
         return err
     }
 
-    // Step 3: Branch by role
-    switch role {
-    case "agent":
-        return setupAgent(network)
-    case "vendor":
-        return setupVendor(network)
+    // Warning for mainnet
+    if network.Value == "mainnet" {
+        tui.PrintSection()
+        fmt.Println(tui.Warning("⚠️  MAINNET WARNING"))
+        fmt.Println(tui.Muted("You are about to configure for Mainnet."))
+        fmt.Println(tui.Muted("All transactions will use real USDC."))
+        fmt.Println()
+        
+        proceed, err := tui.Confirm("Continue with Mainnet?", false)
+        if err != nil {
+            return err
+        }
+        if !proceed {
+            fmt.Println(tui.Muted("Switching to Devnet..."))
+            network.Value = "devnet"
+        }
     }
-    
+
+    // Step 3: Branch by role
+    tui.PrintSection()
+    switch role.Value {
+    case "agent":
+        return setupAgent(network.Value)
+    case "vendor":
+        return setupVendor(network.Value)
+    }
+
     return nil
 }
 
 func setupAgent(network string) error {
+    fmt.Println(tui.Bold("Agent Setup"))
+    fmt.Println()
+
     // 1. Wallet setup
-    // 2. Generate API key via backend
-    // 3. Save config
-    // 4. Show quick start
+    kp, err := promptWallet()
+    if err != nil {
+        return err
+    }
+
+    // 2. Save config (API key generation would go here if backend available)
+    cfg := config.Get()
+    cfg.Role = "agent"
+    cfg.Network = network
+    cfg.Wallet.KeypairPath = filepath.Join(config.GetDir(), "wallet.json")
+    cfg.Wallet.PublicKey = kp.PublicKeyBase58()
+
+    if err := config.Save(); err != nil {
+        return fmt.Errorf("save config: %w", err)
+    }
+
+    // 3. Show success
+    tui.PrintSection()
+    printAgentSuccess(kp.PublicKeyBase58())
+
+    return nil
 }
 
 func setupVendor(network string) error {
-    // 1. Collect service info (name, description, category)
-    // 2. Collect upstream URL and pricing
+    fmt.Println(tui.Bold("Vendor Setup"))
+    fmt.Println()
+
+    // 1. Collect service info
+    serviceName, err := tui.TextInput("Service name", "My LLM API", nil)
+    if err != nil {
+        return err
+    }
+
+    category, err := tui.Select("Category:", []tui.SelectOption{
+        {Label: "AI/ML", Value: "ai"},
+        {Label: "Data", Value: "data"},
+        {Label: "Finance", Value: "finance"},
+        {Label: "Compute", Value: "compute"},
+        {Label: "Other", Value: "other"},
+    })
+    if err != nil {
+        return err
+    }
+
+    tui.PrintSection()
+
+    // 2. Service configuration
+    upstreamURL, err := tui.TextInput("Upstream API URL", "http://localhost:11434", validateURL)
+    if err != nil {
+        return err
+    }
+
+    priceStr, err := tui.TextInput("Price per request (USDC)", "0.001", validatePrice)
+    if err != nil {
+        return err
+    }
+
+    tui.PrintSection()
+
     // 3. Wallet setup
-    // 4. Register with backend
-    // 5. Save config
-    // 6. Show next steps
+    kp, err := promptWallet()
+    if err != nil {
+        return err
+    }
+
+    // 4. Save config
+    cfg := config.Get()
+    cfg.Role = "vendor"
+    cfg.Network = network
+    cfg.Wallet.KeypairPath = filepath.Join(config.GetDir(), "wallet.json")
+    cfg.Wallet.PublicKey = kp.PublicKeyBase58()
+    cfg.Vendor.UpstreamURL = upstreamURL
+    // Parse and store price
+    // cfg.Vendor.PricePerRequest = parsedPrice
+
+    if err := config.Save(); err != nil {
+        return fmt.Errorf("save config: %w", err)
+    }
+
+    // 5. Show success
+    tui.PrintSection()
+    printVendorSuccess(serviceName, category.Value, upstreamURL, priceStr)
+
+    // 6. Offer to start gateway
+    fmt.Println()
+    startNow, err := tui.Confirm("Start gateway now?", true)
+    if err != nil {
+        return err
+    }
+    if startNow {
+        fmt.Println()
+        fmt.Println(tui.Muted("Starting gateway..."))
+        fmt.Println(tui.Info("Run 'machpay serve' to start the gateway."))
+        // TODO: Actually start gateway in Phase 3
+    }
+
+    return nil
+}
+
+func runNonInteractiveSetup() error {
+    role := os.Getenv("MACHPAY_ROLE")
+    network := os.Getenv("MACHPAY_NETWORK")
+    walletPath := os.Getenv("MACHPAY_WALLET_PATH")
+
+    if role == "" {
+        return fmt.Errorf("MACHPAY_ROLE environment variable required")
+    }
+    if network == "" {
+        network = "devnet"
+    }
+
+    fmt.Printf("Configuring as %s on %s...\n", role, network)
+
+    cfg := config.Get()
+    cfg.Role = role
+    cfg.Network = network
+    
+    if walletPath != "" {
+        cfg.Wallet.KeypairPath = walletPath
+        // Load and validate wallet
+        kp, err := wallet.LoadFromFile(walletPath)
+        if err != nil {
+            return fmt.Errorf("load wallet: %w", err)
+        }
+        cfg.Wallet.PublicKey = kp.PublicKeyBase58()
+    }
+
+    if err := config.Save(); err != nil {
+        return fmt.Errorf("save config: %w", err)
+    }
+
+    tui.PrintSuccess("Setup complete")
+    return nil
+}
+
+// Validation helpers
+func validateURL(s string) error {
+    if !strings.HasPrefix(s, "http://") && !strings.HasPrefix(s, "https://") {
+        return fmt.Errorf("URL must start with http:// or https://")
+    }
+    return nil
+}
+
+func validatePrice(s string) error {
+    price, err := strconv.ParseFloat(s, 64)
+    if err != nil {
+        return fmt.Errorf("invalid number")
+    }
+    if price <= 0 {
+        return fmt.Errorf("price must be greater than 0")
+    }
+    if price > 1000 {
+        return fmt.Errorf("price seems too high (max 1000 USDC)")
+    }
+    return nil
 }
 ```
 
-### ASCII Art Banner
+### Banner (simplified, styled with Lipgloss)
 
 ```go
 func printSetupBanner() {
-    banner := `
-┌──────────────────────────────────────────────────────────────┐
-│                                                              │
-│   ███╗   ███╗ █████╗  ██████╗██╗  ██╗██████╗  █████╗ ██╗   │
-│   ████╗ ████║██╔══██╗██╔════╝██║  ██║██╔══██╗██╔══██╗╚██╗  │
-│   ██╔████╔██║███████║██║     ███████║██████╔╝███████║ ██║  │
-│   ██║╚██╔╝██║██╔══██║██║     ██╔══██║██╔═══╝ ██╔══██║ ██║  │
-│   ██║ ╚═╝ ██║██║  ██║╚██████╗██║  ██║██║     ██║  ██║██╔╝  │
-│   ╚═╝     ╚═╝╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝╚═╝     ╚═╝  ╚═╝╚═╝   │
-│                                                              │
-│   Setup Wizard                                               │
-│                                                              │
-└──────────────────────────────────────────────────────────────┘
-`
-    fmt.Print(tui.Primary(banner))
+    tui.PrintBanner("MachPay Setup Wizard")
+    
+    user := auth.GetUser()
+    if user != nil {
+        fmt.Printf("Logged in as: %s\n", tui.Primary(user.Email))
+    }
 }
 ```
 
-### Non-Interactive Mode
+### Success Messages
 
-Support environment variables for CI/CD:
+```go
+func printAgentSuccess(address string) {
+    tui.PrintSuccess("Agent setup complete!")
+    fmt.Println()
+    fmt.Printf("  Wallet:  %s\n", tui.Primary(address))
+    fmt.Printf("  Network: %s\n", tui.Muted(config.Get().Network))
+    fmt.Printf("  Config:  %s\n", tui.Muted(config.GetPath()))
+    fmt.Println()
+    fmt.Println(tui.Bold("Quick Start:"))
+    fmt.Println(tui.Box(`pip install machpay
+
+from machpay import MachPay
+client = MachPay()
+response = client.call("weather-api", "/forecast")`))
+    fmt.Println()
+    fmt.Printf("Next: Fund your wallet at %s\n", 
+        tui.Primary(config.GetConsoleURL()+"/agent/finance"))
+}
+
+func printVendorSuccess(name, category, upstream, price string) {
+    tui.PrintSuccess("Vendor setup complete!")
+    fmt.Println()
+    fmt.Printf("  Service:  %s (%s)\n", tui.Primary(name), category)
+    fmt.Printf("  Upstream: %s\n", tui.Muted(upstream))
+    fmt.Printf("  Price:    %s USDC/request\n", tui.Primary(price))
+    fmt.Printf("  Network:  %s\n", tui.Muted(config.Get().Network))
+    fmt.Println()
+    fmt.Println(tui.Bold("Next Steps:"))
+    fmt.Println("  1. Run 'machpay serve' to start your gateway")
+    fmt.Println("  2. Your API will be available for agents to discover")
+}
+```
+
+### Non-Interactive Mode (CI/CD)
+
 ```bash
+# Agent setup
 MACHPAY_ROLE=agent \
 MACHPAY_NETWORK=devnet \
 MACHPAY_WALLET_PATH=~/.machpay/wallet.json \
+machpay setup --non-interactive
+
+# Vendor setup
+MACHPAY_ROLE=vendor \
+MACHPAY_NETWORK=devnet \
+MACHPAY_WALLET_PATH=~/.machpay/wallet.json \
+MACHPAY_UPSTREAM_URL=http://localhost:11434 \
+MACHPAY_PRICE=0.001 \
 machpay setup --non-interactive
 ```
 
 ### Files to Create/Modify
 
 1. `internal/cmd/setup.go` - Main setup command
-2. `internal/cmd/root.go` - Uncomment/add setupCmd
+2. `internal/cmd/root.go` - Add setupCmd
 
 ### Acceptance Criteria
 
 - [ ] Login check with helpful error message
-- [ ] Role selection with clear descriptions
-- [ ] Network selection with risk warning for mainnet
-- [ ] Proper branching to agent/vendor flows
+- [ ] Reconfiguration prompt if already setup
+- [ ] Role selection with numbered options
+- [ ] Network selection with mainnet warning
+- [ ] Agent flow: wallet → success message
+- [ ] Vendor flow: service info → wallet → success
 - [ ] Non-interactive mode with env vars
-- [ ] Beautiful ASCII banner
-- [ ] Ctrl+C handling at any step
+- [ ] All inputs validated
+- [ ] Clear success messages with next steps
 
 ---
 
@@ -453,9 +861,9 @@ func base58Encode(data []byte) string {
 
 func promptWallet() (*wallet.Keypair, error) {
     // Ask: Generate new or Import existing?
-    choice, err := tui.RunSelect("Wallet setup:", []tui.SelectOption{
-        {Label: "Generate new wallet", Value: "generate", Description: "Recommended for new users"},
-        {Label: "Import existing keypair", Value: "import", Description: "Use existing Solana wallet"},
+    choice, err := tui.Select("Wallet setup:", []tui.SelectOption{
+        {Label: "Generate new wallet", Description: "Recommended for new users", Value: "generate"},
+        {Label: "Import existing keypair", Description: "Use existing Solana wallet", Value: "import"},
     })
     if err != nil {
         return nil, err
@@ -471,6 +879,8 @@ func promptWallet() (*wallet.Keypair, error) {
 }
 
 func generateNewWallet() (*wallet.Keypair, error) {
+    fmt.Println(tui.Muted("Generating new wallet..."))
+    
     kp, err := wallet.Generate()
     if err != nil {
         return nil, err
@@ -485,11 +895,51 @@ func generateNewWallet() (*wallet.Keypair, error) {
     fmt.Println()
     tui.PrintSuccess("Generated new wallet")
     fmt.Println()
-    fmt.Printf("   Address: %s\n", tui.Primary(kp.PublicKeyBase58()))
-    fmt.Printf("   Saved to: %s\n", tui.Muted(walletPath))
+    fmt.Printf("  Address:  %s\n", tui.Primary(kp.PublicKeyBase58()))
+    fmt.Printf("  Saved to: %s\n", tui.Muted(walletPath))
     fmt.Println()
     fmt.Println(tui.Warning("⚠️  BACKUP THIS FILE! It contains your private key."))
+
+    return kp, nil
+}
+
+func importExistingWallet() (*wallet.Keypair, error) {
+    path, err := tui.TextInput("Path to keypair file", "~/.config/solana/id.json", func(s string) error {
+        // Expand ~ to home directory
+        if strings.HasPrefix(s, "~") {
+            home, _ := os.UserHomeDir()
+            s = filepath.Join(home, s[1:])
+        }
+        if _, err := os.Stat(s); os.IsNotExist(err) {
+            return fmt.Errorf("file not found: %s", s)
+        }
+        return nil
+    })
+    if err != nil {
+        return nil, err
+    }
+
+    // Expand path
+    if strings.HasPrefix(path, "~") {
+        home, _ := os.UserHomeDir()
+        path = filepath.Join(home, path[1:])
+    }
+
+    // Load keypair
+    kp, err := wallet.LoadFromFile(path)
+    if err != nil {
+        return nil, fmt.Errorf("load keypair: %w", err)
+    }
+
+    // Copy to MachPay directory
+    destPath := filepath.Join(config.GetDir(), "wallet.json")
+    if err := kp.SaveToFile(destPath); err != nil {
+        return nil, fmt.Errorf("save keypair: %w", err)
+    }
+
     fmt.Println()
+    tui.PrintSuccess("Imported wallet")
+    fmt.Printf("  Address: %s\n", tui.Primary(kp.PublicKeyBase58()))
 
     return kp, nil
 }
@@ -1157,9 +1607,24 @@ func NewMockAPIServer() *httptest.Server {
 
 ## Implementation Order
 
-1. **2.1** TUI Prompts → Foundation for interactive wizard
+```
+2.1 TUI Prompts ─────┐
+                     ├──→ 2.2 Setup Command
+2.3 Wallet Gen ──────┤
+                     │
+2.4 API Client ──────┘
+
+2.5 Open Command ────→ (Independent)
+
+2.6 Enhanced Status ─→ (Independent)
+
+2.7 Tests ───────────→ (After all above)
+```
+
+**Recommended sequence:**
+1. **2.1** TUI Prompts → Foundation (simple stdin + lipgloss)
 2. **2.3** Wallet Generation → Needed by setup
-3. **2.4** API Client → Needed by setup
+3. **2.4** API Client → Needed by setup (can stub for now)
 4. **2.2** Setup Command → Main feature
 5. **2.5** Open Command → Quick win
 6. **2.6** Enhanced Status → Improvement
@@ -1175,14 +1640,15 @@ After implementing all prompts:
 # Build
 go build -o machpay ./cmd/machpay
 
-# Test login → setup flow
+# Test the full flow
 ./machpay login
-./machpay setup
-
-# Test commands
+./machpay setup      # Interactive wizard
 ./machpay status
-./machpay status --json
+./machpay status --json | jq .
 ./machpay open marketplace
+
+# Non-interactive setup (for CI)
+MACHPAY_ROLE=agent MACHPAY_NETWORK=devnet ./machpay setup --non-interactive
 
 # Run all tests
 go test ./... -v
@@ -1190,6 +1656,21 @@ go test ./... -v
 
 ---
 
-*Phase 2 Estimated Time: 1 week*
+## No New Dependencies Required
+
+Phase 2 uses only existing dependencies:
+- `github.com/charmbracelet/lipgloss` - Styling (already in go.mod)
+- `github.com/spf13/cobra` - CLI framework (already in go.mod)
+- `github.com/spf13/viper` - Config (already in go.mod)
+- `github.com/pkg/browser` - Browser opening (already in go.mod)
+
+Standard library for:
+- `bufio.Reader` - Stdin input
+- `crypto/ed25519` - Keypair generation
+- `encoding/json` - JSON output
+
+---
+
+*Phase 2 Estimated Time: 4-5 days*
 *Next: Phase 3 - Gateway Integration*
 
